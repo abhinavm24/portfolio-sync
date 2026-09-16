@@ -70,7 +70,7 @@ jobs:
       - name: Sync Zerodha → Monarch + PF Summary sheet
         env:
           GSHEET_SERVICE_ACCOUNT_JSON: ${{ secrets.GSHEET_SERVICE_ACCOUNT_JSON }}
-          MONARCH_TOKEN: ${{ secrets.MONARCH_TOKEN }}
+          MONARCH_COOKIE: ${{ secrets.MONARCH_COOKIE }}
           GSHEET_SHEET_ID: ${{ vars.GSHEET_SHEET_ID }}
           GSHEET_TAB: ${{ vars.GSHEET_TAB }}
           GSHEET_LABEL: ${{ vars.GSHEET_LABEL }}
@@ -83,7 +83,7 @@ jobs:
       - name: Sync Monarch holdings → US Portfolio sheet
         env:
           GSHEET_SERVICE_ACCOUNT_JSON: ${{ secrets.GSHEET_SERVICE_ACCOUNT_JSON }}
-          MONARCH_TOKEN: ${{ secrets.MONARCH_TOKEN }}
+          MONARCH_COOKIE: ${{ secrets.MONARCH_COOKIE }}
           GSHEET_SHEET_ID: ${{ vars.GSHEET_SHEET_ID }}
         run: set -o pipefail; python sync_us_portfolio.py 2>&1 | tee -a sync_output.txt
 

@@ -16,7 +16,7 @@ from unittest.mock import patch, MagicMock
 # Set required env vars before importing sync (module-level reads)
 os.environ.setdefault("GSHEET_SHEET_ID", "test-sheet-id")
 os.environ.setdefault("GSHEET_SERVICE_ACCOUNT_JSON", json.dumps({"type": "service_account"}))
-os.environ.setdefault("MONARCH_TOKEN", "test-token")
+os.environ.setdefault("MONARCH_COOKIE", "test-token")
 
 import sync
 

@@ -10,7 +10,7 @@ What this does each run:
     (Theme and Conviction Rating are left blank — fill in manually)
 
 Required env vars:
-  MONARCH_TOKEN                Monarch Money API token
+  MONARCH_COOKIE                Monarch Money browser session cookie (session_id + csrftoken)
   GSHEET_SHEET_ID              Google Sheet ID
   GSHEET_SERVICE_ACCOUNT_JSON  Service account JSON (string)
 
@@ -90,17 +90,38 @@ def get_sheet_tickers() -> list[tuple[int, str]]:
 
 # ── Monarch Money helpers ─────────────────────────────────────────────────────
 
-def _monarch_request(token: str, payload: bytes) -> dict:
+def _cookie_value(cookie: str, name: str) -> str:
+    for part in cookie.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return value
+    raise ValueError(f"Cookie '{name}' not found in MONARCH_COOKIE")
+
+
+def _monarch_request(cookie: str, payload: bytes) -> dict:
+    """Call Monarch's GraphQL API using a browser session cookie.
+
+    Monarch put programmatic /auth/login/ behind a Cloudflare CAPTCHA and
+    stopped accepting `Authorization: Token` on /graphql (Sep 2026), so auth
+    now requires a session_id + csrftoken cookie pulled from a logged-in
+    browser (see monarch-mcp-server login_setup docs for how to refresh it).
+    """
     import urllib.request
     req = urllib.request.Request(
         "https://api.monarch.com/graphql",
         data=payload,
         headers={
-            "Authorization": f"Token {token}",
+            "Cookie": cookie,
+            "X-Csrftoken": _cookie_value(cookie, "csrftoken"),
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Client-Platform": "web",
-            "User-Agent": "MonarchMoneyAPI (https://github.com/bradleyseanf/monarchmoneycommunity)",
+            "Origin": "https://app.monarch.com",
+            "Referer": "https://app.monarch.com/",
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
         },
     )
     for attempt in range(3):
@@ -133,9 +154,9 @@ query GetHoldings($accountId: ID!) {
 """
 
 
-def get_all_holdings(token: str) -> dict[str, float]:
+def get_all_holdings(cookie: str) -> dict[str, float]:
     """Return {ticker: total_quantity} across all active brokerage accounts."""
-    result = _monarch_request(token, json.dumps({"query": _ACCOUNTS_QUERY}).encode())
+    result = _monarch_request(cookie, json.dumps({"query": _ACCOUNTS_QUERY}).encode())
     accounts = result.get("data", {}).get("accounts", [])
     brokerage_ids = [
         a["id"] for a in accounts
@@ -149,7 +170,7 @@ def get_all_holdings(token: str) -> dict[str, float]:
             "query": _HOLDINGS_QUERY,
             "variables": {"accountId": account_id},
         }).encode()
-        data = _monarch_request(token, payload)
+        data = _monarch_request(cookie, payload)
         edges = (
             data.get("data", {})
             .get("portfolio", {})
@@ -269,9 +290,9 @@ def _shorten_account_name(display_name: str) -> str:
     return re.sub(r'\(\.\.\.(.*?)\)', r'(\1)', display_name).strip() or display_name
 
 
-def get_holdings_by_account(token: str) -> dict[str, dict[str, float]]:
+def get_holdings_by_account(cookie: str) -> dict[str, dict[str, float]]:
     """Return {ticker: {account_short_name: qty}} across all active brokerage accounts."""
-    result = _monarch_request(token, json.dumps({"query": _ACCOUNTS_QUERY}).encode())
+    result = _monarch_request(cookie, json.dumps({"query": _ACCOUNTS_QUERY}).encode())
     accounts = result.get("data", {}).get("accounts", [])
     brokerage_accounts = [
         a for a in accounts
@@ -286,7 +307,7 @@ def get_holdings_by_account(token: str) -> dict[str, dict[str, float]]:
             "query": _HOLDINGS_QUERY,
             "variables": {"accountId": account_id},
         }).encode()
-        data = _monarch_request(token, payload)
+        data = _monarch_request(cookie, payload)
         edges = (
             data.get("data", {})
             .get("portfolio", {})
@@ -669,9 +690,9 @@ def update_quantities(
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def sync(token: str) -> None:
+def sync(cookie: str) -> None:
     print("Fetching brokerage holdings from Monarch Money...")
-    holdings = get_all_holdings(token)
+    holdings = get_all_holdings(cookie)
     print(f"  {len(holdings)} equity positions: {sorted(holdings.keys())}")
 
     print(f"\nReading tickers from '{US_PORTFOLIO_TAB}' tab...")
@@ -728,7 +749,7 @@ def sync(token: str) -> None:
 
     # ── Step 5: Sync Holdings by Account tab ─────────────────────────────────
     print("\nFetching per-account breakdown...")
-    breakdown = get_holdings_by_account(token)
+    breakdown = get_holdings_by_account(cookie)
     sync_account_tab(breakdown)
     print(f"  Wrote {sum(len(v) for v in breakdown.values())} rows to '{ACCOUNT_TAB}'.")
 
@@ -736,4 +757,4 @@ def sync(token: str) -> None:
 
 
 if __name__ == "__main__":
-    sync(os.environ["MONARCH_TOKEN"])
+    sync(os.environ["MONARCH_COOKIE"])

@@ -7,7 +7,7 @@ _TEST_ENV = {
     "KITE_API_KEY": "test_kite_key",
     "KITE_ACCESS_TOKEN": "test_kite_token",
     "GSHEET_SERVICE_ACCOUNT_JSON": '{"type": "service_account"}',
-    "MONARCH_TOKEN": "test_monarch_token",
+    "MONARCH_COOKIE": "test_monarch_token",
     "ACCOUNTS_JSON": '[{"mask": "1234", "sheet_category": "Bank", "sheet_institution": "Chase"}]',
 }
 for k, v in _TEST_ENV.items():

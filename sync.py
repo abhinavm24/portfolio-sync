@@ -69,33 +69,54 @@ def get_indian_pf_balance() -> float:
 
 
 # ── Step 2: Update Monarch Money (Zerodha balance) ───────────────────────────
-def monarch_request(token: str, payload: bytes) -> dict:
+def _cookie_value(cookie: str, name: str) -> str:
+    for part in cookie.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return value
+    raise ValueError(f"Cookie '{name}' not found in MONARCH_COOKIE")
+
+
+def monarch_request(cookie: str, payload: bytes) -> dict:
+    """Call Monarch's GraphQL API using a browser session cookie.
+
+    Monarch put programmatic /auth/login/ behind a Cloudflare CAPTCHA and
+    stopped accepting `Authorization: Token` on /graphql (Sep 2026), so auth
+    now requires a session_id + csrftoken cookie pulled from a logged-in
+    browser (see monarch-mcp-server login_setup docs for how to refresh it).
+    """
     import urllib.request
     req = urllib.request.Request(
         "https://api.monarch.com/graphql",
         data=payload,
         headers={
-            "Authorization": f"Token {token}",
+            "Cookie": cookie,
+            "X-Csrftoken": _cookie_value(cookie, "csrftoken"),
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Client-Platform": "web",
-            "User-Agent": "MonarchMoneyAPI (https://github.com/bradleyseanf/monarchmoneycommunity)",
+            "Origin": "https://app.monarch.com",
+            "Referer": "https://app.monarch.com/",
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
         },
     )
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read())
 
 
-def get_monarch_accounts(token: str) -> list:
+def get_monarch_accounts(cookie: str) -> list:
     payload = json.dumps({
         "query": "{ accounts { id displayName isHidden deactivatedAt displayBalance mask type { name } } }",
     }).encode()
-    result = monarch_request(token, payload)
+    result = monarch_request(cookie, payload)
     return result.get("data", {}).get("accounts", [])
 
 
-def get_monarch_account_id(token: str) -> str:
-    accounts = get_monarch_accounts(token)
+def get_monarch_account_id(cookie: str) -> str:
+    accounts = get_monarch_accounts(cookie)
     for account in accounts:
         if account.get("displayName") == MONARCH_ACCOUNT_NAME:
             return account["id"]
@@ -104,10 +125,10 @@ def get_monarch_account_id(token: str) -> str:
 
 
 def update_monarch(balance: float) -> None:
-    token = os.environ["MONARCH_TOKEN"]
+    cookie = os.environ["MONARCH_COOKIE"]
 
     print(f"  Looking up Monarch account '{MONARCH_ACCOUNT_NAME}'...")
-    account_id = get_monarch_account_id(token)
+    account_id = get_monarch_account_id(cookie)
     print(f"  Found account ID: {account_id}")
 
     query = """
@@ -134,7 +155,7 @@ def update_monarch(balance: float) -> None:
         },
     }).encode()
 
-    result = monarch_request(token, payload)
+    result = monarch_request(cookie, payload)
 
     errors = result.get("data", {}).get("updateAccount", {}).get("errors", [])
     if errors:
@@ -146,13 +167,13 @@ def update_monarch(balance: float) -> None:
 
 
 # ── Step 3: Read account balances + SGOV total from Monarch ──────────────────
-def get_account_balances(token: str) -> dict[str, float]:
+def get_account_balances(cookie: str) -> dict[str, float]:
     """Match Monarch accounts to SHEET_ACCOUNTS entries by mask or monarch_name.
 
     Returns {entry_index: balance} keyed by position in SHEET_ACCOUNTS so
     duplicate category+institution entries are handled unambiguously.
     """
-    accounts = get_monarch_accounts(token)
+    accounts = get_monarch_accounts(cookie)
     balances: dict[int, float] = {}
     unmatched: list[int] = []
 
@@ -203,9 +224,9 @@ query GetHoldings($accountId: ID!) {
 """
 
 
-def get_sgov_total(token: str) -> float:
+def get_sgov_total(cookie: str) -> float:
     """Sum SGOV quantity across all active brokerage accounts."""
-    accounts = get_monarch_accounts(token)
+    accounts = get_monarch_accounts(cookie)
     brokerage_ids = [
         a["id"] for a in accounts
         if a.get("type", {}).get("name") == "brokerage" and not a.get("deactivatedAt")
@@ -217,7 +238,7 @@ def get_sgov_total(token: str) -> float:
             "query": _SGOV_HOLDINGS_QUERY,
             "variables": {"accountId": account_id},
         }).encode()
-        result = monarch_request(token, payload)
+        result = monarch_request(cookie, payload)
         edges = (
             result.get("data", {})
             .get("portfolio", {})
@@ -235,9 +256,9 @@ def get_sgov_total(token: str) -> float:
     return round(total_sgov, 6)
 
 
-def print_sgov_breakdown(token: str) -> float:
+def print_sgov_breakdown(cookie: str) -> float:
     """Print per-account SGOV holdings as structured log lines and return total."""
-    accounts = get_monarch_accounts(token)
+    accounts = get_monarch_accounts(cookie)
     brokerage_accounts = [
         a for a in accounts
         if a.get("type", {}).get("name") == "brokerage" and not a.get("deactivatedAt")
@@ -251,7 +272,7 @@ def print_sgov_breakdown(token: str) -> float:
             "query": _SGOV_HOLDINGS_QUERY,
             "variables": {"accountId": account_id},
         }).encode()
-        result = monarch_request(token, payload)
+        result = monarch_request(cookie, payload)
         edges = (
             result.get("data", {})
             .get("portfolio", {})
@@ -343,7 +364,7 @@ def update_google_sheet(balances: dict[int, float], sgov_total: float) -> None:
 
 
 # ── Step 5: Fetch Monarch net worth ───────────────────────────────────────────
-def print_net_worth(token: str) -> None:
+def print_net_worth(cookie: str) -> None:
     """Fetch the most recent aggregate net worth from Monarch and emit a log line.
 
     Queries a 2-day window ending today (UTC) so the call succeeds even when
@@ -364,7 +385,7 @@ def print_net_worth(token: str) -> None:
         """,
         "variables": {"filters": {"startDate": start, "endDate": end}},
     }).encode()
-    result = monarch_request(token, payload)
+    result = monarch_request(cookie, payload)
     snapshots = result.get("data", {}).get("aggregateSnapshots", [])
     if snapshots:
         snap = snapshots[-1]
@@ -464,9 +485,9 @@ def print_pf_summary(monarch_us_pf: float | None = None) -> None:
 _UNINVESTED_TICKERS = {"CUR:USD", "FCASH", "FDRXX", "SPAXX"}
 
 
-def print_uninvested_cash(token: str) -> None:
+def print_uninvested_cash(cookie: str) -> None:
     """Print per-account uninvested cash as structured log lines (>= $1 only)."""
-    accounts = get_monarch_accounts(token)
+    accounts = get_monarch_accounts(cookie)
     brokerage_accounts = [
         a for a in accounts
         if a.get("type", {}).get("name") == "brokerage" and not a.get("deactivatedAt")
@@ -479,7 +500,7 @@ def print_uninvested_cash(token: str) -> None:
             "query": _SGOV_HOLDINGS_QUERY,
             "variables": {"accountId": account_id},
         }).encode()
-        result = monarch_request(token, payload)
+        result = monarch_request(cookie, payload)
         edges = (
             result.get("data", {})
             .get("portfolio", {})
@@ -497,12 +518,12 @@ def print_uninvested_cash(token: str) -> None:
 
 
 # ── Step 5b-2: Fetch Monarch equity total for US PF sanity check ─────────────
-def get_monarch_us_pf_estimate(token: str) -> float:
+def get_monarch_us_pf_estimate(cookie: str) -> float:
     """Sum Monarch's totalValue for equity holdings across all active brokerage accounts.
 
     Used to sanity-check the sheet's GOOGLEFINANCE-computed US PF value.
     """
-    accounts = get_monarch_accounts(token)
+    accounts = get_monarch_accounts(cookie)
     brokerage_ids = [
         a["id"] for a in accounts
         if a.get("type", {}).get("name") == "brokerage" and not a.get("deactivatedAt")
@@ -514,7 +535,7 @@ def get_monarch_us_pf_estimate(token: str) -> float:
             "query": _SGOV_HOLDINGS_QUERY,
             "variables": {"accountId": account_id},
         }).encode()
-        result = monarch_request(token, payload)
+        result = monarch_request(cookie, payload)
         edges = (
             result.get("data", {})
             .get("portfolio", {})
@@ -543,9 +564,9 @@ def print_ef_breakdown(balances: dict[int, float]) -> None:
 
 
 # ── Step 5d: Print home value ─────────────────────────────────────────────────
-def print_home_value(token: str) -> None:
+def print_home_value(cookie: str) -> None:
     """Emit [Home] log lines for Zillow home value and mortgage."""
-    accounts = get_monarch_accounts(token)
+    accounts = get_monarch_accounts(cookie)
     home_value = None
     mortgage = None
     for acct in accounts:
@@ -567,7 +588,7 @@ def print_home_value(token: str) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    token = os.environ["MONARCH_TOKEN"]
+    cookie = os.environ["MONARCH_COOKIE"]
 
     # Zerodha → Monarch
     print("Fetching Indian PF balance from Google Sheets...")
@@ -578,15 +599,15 @@ if __name__ == "__main__":
 
     # Monarch → Google Sheets
     print("\nFetching account balances from Monarch...")
-    balances = get_account_balances(token)
+    balances = get_account_balances(cookie)
     print(f"  Found {len(balances)} accounts")
 
     print("Fetching SGOV holdings from Monarch...")
-    sgov_total = print_sgov_breakdown(token)
+    sgov_total = print_sgov_breakdown(cookie)
     print(f"  SGOV total: {sgov_total:,.4f} shares")
 
     print("Fetching uninvested cash from Monarch...")
-    print_uninvested_cash(token)
+    print_uninvested_cash(cookie)
 
     print("Writing to Google Sheets...")
     update_google_sheet(balances, sgov_total)
@@ -595,13 +616,13 @@ if __name__ == "__main__":
     print_ef_breakdown(balances)
 
     print("\nFetching home value from Monarch...")
-    print_home_value(token)
+    print_home_value(cookie)
 
     print("\nFetching Monarch net worth...")
-    print_net_worth(token)
+    print_net_worth(cookie)
 
     print("\nFetching Monarch US PF estimate for sanity check...")
-    monarch_us_pf = get_monarch_us_pf_estimate(token)
+    monarch_us_pf = get_monarch_us_pf_estimate(cookie)
     print(f"  Monarch equity estimate: ${monarch_us_pf:,.2f}")
 
     print("\nReading PF summary...")
